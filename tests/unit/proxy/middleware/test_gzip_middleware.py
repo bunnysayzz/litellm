@@ -259,3 +259,33 @@ def test_proxy_app_gzips_large_responses_for_clients_that_accept_it():
     assert compressed.headers["content-encoding"] == "gzip"
     assert int(compressed.headers["content-length"]) < int(identity.headers["content-length"])
     assert compressed.json() == identity.json()
+
+
+@pytest.mark.asyncio
+async def test_event_stream_start_is_forwarded_before_first_chunk():
+    start_forwarded = asyncio.Event()
+
+    async def sse_app(scope: Scope, receive: Receive, send: Send) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/event-stream")],
+            }
+        )
+        # On the buggy code the start is held until the first body chunk, so
+        # waiting here deadlocks and the test times out instead of passing.
+        await asyncio.wait_for(start_forwarded.wait(), timeout=5)
+        await send({"type": "http.response.body", "body": b": ping\n\n", "more_body": False})
+
+    async def send(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            start_forwarded.set()
+
+    scope: Scope = {"type": "http", "method": "GET", "path": "/mcp", "query_string": b"", "headers": []}
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    await GZipBufferedResponseMiddleware(sse_app)(scope, receive, send)
+    assert start_forwarded.is_set()

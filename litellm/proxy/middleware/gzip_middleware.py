@@ -25,6 +25,13 @@ def accepts_gzip(accept_encoding: str) -> bool:
     return weights.get("gzip", weights.get("x-gzip", weights.get("*", 0.0))) > 0
 
 
+def _is_event_stream(start: Message) -> bool:
+    return any(
+        name.lower() == b"content-type" and b"text/event-stream" in value.lower()
+        for name, value in start.get("headers", [])
+    )
+
+
 async def _compress(body: bytes) -> bytes:
     if len(body) < OFF_LOOP_SIZE_BYTES:
         return gzip.compress(body, compresslevel=COMPRESS_LEVEL)
@@ -32,7 +39,10 @@ async def _compress(body: bytes) -> bytes:
 
 
 class _BufferedBodyGzipResponder:
-    """Holds the response start until the first body message shows the body is complete, so streams are never delayed."""
+    """Holds the response start until the first body message shows the body is complete.
+
+    Event-stream responses skip the hold since they are never compressed.
+    """
 
     def __init__(self, send: Send, gzip_accepted: bool) -> None:
         self.send = send
@@ -45,6 +55,11 @@ class _BufferedBodyGzipResponder:
             await self.send(message)
             return
         if message["type"] == "http.response.start":
+            if _is_event_stream(message):
+                # Never compressed (needs the full body up front): don't hold the headers.
+                self.decided = True
+                await self.send(message)
+                return
             self.held_start = message
             return
         self.decided = True
